@@ -66,16 +66,44 @@ func open_db() (db) {
     sqlite_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS uniq_slot ON booking(start_utc) WHERE status='confirmed'")
 }
 
+// json_unescape turns a JSON string body (without the surrounding quotes) back
+// into its literal text, undoing the standard escapes. \uXXXX and the
+// machin-unrepresentable \b/\f are passed through unchanged (rare in form input).
+func json_unescape(s) (o) {
+    o = ""
+    i := 0
+    n := len(s)
+    for i < n {
+        c := charat(s, i)
+        if c == "\\" {
+            if i + 1 < n {
+                e := charat(s, i + 1)
+                if e == "n" { o = o + "\n"  i = i + 2  continue }
+                if e == "r" { o = o + "\r"  i = i + 2  continue }
+                if e == "t" { o = o + "\t"  i = i + 2  continue }
+                if e == "\"" { o = o + "\""  i = i + 2  continue }
+                if e == "\\" { o = o + "\\"  i = i + 2  continue }
+                if e == "/" { o = o + "/"  i = i + 2  continue }
+                o = o + c + e          // unknown escape (\b \f \uXXXX): leave as-is
+                i = i + 2
+                continue
+            }
+        }
+        o = o + c
+        i = i + 1
+    }
+}
+
 // json_get returns a value's raw JSON text: numbers bare, but strings keep their
-// surrounding quotes. jstr extracts a string field and strips them (MVP: no inner
-// unescaping, fine for names/emails/hex tokens).
+// surrounding quotes AND inner escapes. jstr strips the quotes and unescapes the
+// body so names/notes come back as literal text.
 func jstr(s, path) (v) {
     raw, _ := json_get(s, path)
     v = raw
     if len(raw) >= 2 {
         if charat(raw, 0) == "\"" {
             if charat(raw, len(raw) - 1) == "\"" {
-                v = substr(raw, 1, len(raw) - 1)
+                v = json_unescape(substr(raw, 1, len(raw) - 1))
             }
         }
     }
