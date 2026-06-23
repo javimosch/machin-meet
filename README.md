@@ -45,6 +45,24 @@ Then open **http://localhost:48080/** to book, or **/admin?key=YOUR_SECRET** to 
 | `TZ`          | system | Time zone everything is shown in (the page labels it) |
 | `MEET_WA_CHATID` | *(unset)* | Your WhatsApp JID (e.g. `15551234567@s.whatsapp.net`). Set it to get a WhatsApp ping on every booking; leave empty to disable. |
 | `MEET_WA_BRIDGE` | `127.0.0.1:3000` | host:port of the WhatsApp bridge (see below) |
+| `MEET_NOTIFY_TOKEN` | *(unset)* | App token for a [machin-notify](https://github.com/javimosch/machin-notify) hub. Set it (+ channel) to get Discord/Telegram alerts on every booking. |
+| `MEET_NOTIFY_CHANNEL` | *(unset)* | The machin-notify channel/route to send bookings to (e.g. `bookings`) |
+| `MEET_NOTIFY_ADDR` | `127.0.0.1:48090` | host:port of the machin-notify daemon |
+
+## Notifications (optional)
+
+machin-meet pings you on every booking through two independent, best-effort paths — set whichever you want (or both); each is a no-op if unconfigured:
+
+- **Discord / Telegram** via a [machin-notify](https://github.com/javimosch/machin-notify) hub — run the hub, add a channel, mint a token, then set `MEET_NOTIFY_TOKEN` + `MEET_NOTIFY_CHANNEL`. No provider code in machin-meet; add/route channels at the hub.
+
+  ```bash
+  machin-notify daemon &
+  machin-notify add discord bookings <webhook-url>
+  TOK=$(machin-notify token new machin-meet | grep -oE '[0-9a-f]{48}')
+  MEET_NOTIFY_TOKEN=$TOK MEET_NOTIFY_CHANNEL=bookings MEET_SECRET=… ./machin-meet
+  ```
+
+- **WhatsApp** to your own number via a local Baileys bridge (below).
 
 ## WhatsApp notifications (optional)
 

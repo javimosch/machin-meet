@@ -142,6 +142,31 @@ func notify_owner(msg) {
     close(fd)
 }
 
+// notify_hub sends the same message through a machin-notify daemon (Discord /
+// Telegram / …) if MEET_NOTIFY_TOKEN + MEET_NOTIFY_CHANNEL are set — so booking
+// alerts reach those channels with no provider code here. Best-effort.
+func NOTIFY_ADDR() (s) { s = env("MEET_NOTIFY_ADDR")  if s == "" { s = "127.0.0.1:48090" } }
+func notify_hub(msg) {
+    token := env("MEET_NOTIFY_TOKEN")
+    channel := env("MEET_NOTIFY_CHANNEL")
+    if token == "" { return }
+    if channel == "" { return }
+    hostport := NOTIFY_ADDR()
+    host := hostport
+    port := 48090
+    ci := index(hostport, ":")
+    if ci >= 0 {
+        host = substr(hostport, 0, ci)
+        port = parse_int(substr(hostport, ci + 1, len(hostport)))
+    }
+    body := "{\"token\":\"" + json_escape(token) + "\",\"channel\":\"" + json_escape(channel) + "\",\"message\":\"" + json_escape(msg) + "\"}"
+    fd := dial(host, port)
+    if fd < 0 { return }
+    write(fd, "POST /notify HTTP/1.1\r\nHost: " + hostport + "\r\nContent-Type: application/json\r\nContent-Length: " + str(len(body)) + "\r\nConnection: close\r\n\r\n" + body)
+    read(fd)
+    close(fd)
+}
+
 // ---------- signed manage tokens ----------
 
 func token_for(id) (t) { t = hmac_sha256(SECRET(), "booking:" + id) }
@@ -277,7 +302,8 @@ func api_book(body) (res) {
     msg := "✅ New booking\n" + nm + "\n" + when
     if em != "" { msg = msg + "\n" + em }
     if nt != "" { msg = msg + "\nNote: " + nt }
-    notify_owner(msg)
+    notify_owner(msg)                          // WhatsApp via the Baileys bridge (if configured)
+    notify_hub(msg)                            // Discord/Telegram via machin-notify (if configured)
     res = ok_json("{\"ok\":true,\"id\":" + idv + ",\"manage\":\"/m/" + idv + "?t=" + tok + "\",\"ics\":\"/ics/" + idv + "?t=" + tok + "\"}")
 }
 
