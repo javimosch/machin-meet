@@ -12,11 +12,11 @@ A booking tool has to answer "**09:00 local on a given day → which Unix second
 time_make(2026, 6, 25, 9, 0, 0)   // -> 1782378000  (mktime, local time, DST-aware)
 ```
 
-That completes machin's **time trio**: `time_make` (construct) ↔ `time_fields` (decompose) ↔ `time_format` (render). machin-meet also leans on `sqlite_*` (bookings), `hmac_sha256` (signed links), and `json_get` (request bodies) — all earlier dogfood builtins, now composed into one real app.
+That completes machin's **time trio**: `time_make` (construct) ↔ `time_fields` (decompose) ↔ `time_format` (render). Finishing the `.ics` output then drove one more: **`time_format_utc`** (v0.31.0), strftime in UTC, for the `DTSTART:…Z` stamps. machin-meet also leans on `sqlite_*` (bookings), `hmac_sha256` (signed links), and `json_get` (request bodies) — all earlier dogfood builtins, now composed into one real app.
 
 ## Build
 
-Needs the [machin](https://github.com/javimosch/machin) compiler (v0.30.0+) on `PATH`, plus a C compiler and `libsqlite3`.
+Needs the [machin](https://github.com/javimosch/machin) compiler (v0.31.0+) on `PATH`, plus a C compiler and `libsqlite3`.
 
 ```bash
 ./build.sh                          # → ./machin-meet
