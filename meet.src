@@ -159,10 +159,10 @@ func notify_hub(msg) {
         host = substr(hostport, 0, ci)
         port = parse_int(substr(hostport, ci + 1, len(hostport)))
     }
-    body := "{\"token\":\"" + json_escape(token) + "\",\"channel\":\"" + json_escape(channel) + "\",\"message\":\"" + json_escape(msg) + "\"}"
+    body := "{\"channel\":\"" + json_escape(channel) + "\",\"message\":\"" + json_escape(msg) + "\"}"
     fd := dial(host, port)
     if fd < 0 { return }
-    write(fd, "POST /notify HTTP/1.1\r\nHost: " + hostport + "\r\nContent-Type: application/json\r\nContent-Length: " + str(len(body)) + "\r\nConnection: close\r\n\r\n" + body)
+    write(fd, "POST /notify HTTP/1.1\r\nHost: " + hostport + "\r\nAuthorization: Bearer " + token + "\r\nContent-Type: application/json\r\nContent-Length: " + str(len(body)) + "\r\nConnection: close\r\n\r\n" + body)
     read(fd)
     close(fd)
 }
