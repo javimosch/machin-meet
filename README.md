@@ -2,7 +2,9 @@
 
 A **minimal, self-hostable Calendly for one person** — written in **[machin](https://github.com/javimosch/machin)** (MFL). A *single native binary*: HTTP server + SQLite + an embedded booking page. Visitors pick a free slot, leave their name, and get a calendar `.ics` plus a signed manage/cancel link. No accounts, no SaaS, no dependencies beyond libc + libsqlite3.
 
-Part of [**awesome-machin**](https://github.com/javimosch/awesome-machin) — the machin ecosystem.
+Part of [**awesome-machin**](https://github.com/javimosch/awesome-machin) — the machin ecosystem. Booking alerts via [**machin-notify**](https://github.com/javimosch/machin-notify) (Discord/Telegram) or a WhatsApp bridge.
+
+> **Agents:** [`SKILL.md`](SKILL.md) teaches how to operate, configure, deploy, and add notifications.
 
 ## Why it exists (dogfooding)
 
