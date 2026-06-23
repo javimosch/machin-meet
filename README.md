@@ -12,11 +12,11 @@ A booking tool has to answer "**09:00 local on a given day → which Unix second
 time_make(2026, 6, 25, 9, 0, 0)   // -> 1782378000  (mktime, local time, DST-aware)
 ```
 
-That completes machin's **time trio**: `time_make` (construct) ↔ `time_fields` (decompose) ↔ `time_format` (render). Finishing the `.ics` output then drove one more: **`time_format_utc`** (v0.31.0), strftime in UTC, for the `DTSTART:…Z` stamps. machin-meet also leans on `sqlite_*` (bookings), `hmac_sha256` (signed links), and `json_get` (request bodies) — all earlier dogfood builtins, now composed into one real app.
+That completes machin's **time trio**: `time_make` (construct) ↔ `time_fields` (decompose) ↔ `time_format` (render). Finishing the `.ics` output then drove one more: **`time_format_utc`** (v0.31.0), strftime in UTC, for the `DTSTART:…Z` stamps. Wiring the booking page's percent-escaped query/form values drove **`url_decode`** (v0.32.0), and adding WhatsApp notifications via a cloud provider drove **`http_request`** (v0.33.0, authenticated HTTPS). machin-meet also leans on `sqlite_*` (bookings), `hmac_sha256` (signed links), and `json_get` (request bodies) — all earlier dogfood builtins, now composed into one real app.
 
 ## Build
 
-Needs the [machin](https://github.com/javimosch/machin) compiler (v0.31.0+) on `PATH`, plus a C compiler and `libsqlite3`.
+Needs the [machin](https://github.com/javimosch/machin) compiler (v0.33.0+) on `PATH`, plus a C compiler and `libsqlite3`.
 
 ```bash
 ./build.sh                          # → ./machin-meet
@@ -43,6 +43,24 @@ Then open **http://localhost:48080/** to book, or **/admin?key=YOUR_SECRET** to 
 | `MEET_PORT`   | `48080` | Listen port |
 | `MEET_DB`     | `meet.db` | SQLite file (created on first run) |
 | `TZ`          | system | Time zone everything is shown in (the page labels it) |
+| `MEET_WA_CHATID` | *(unset)* | Your WhatsApp JID (e.g. `15551234567@s.whatsapp.net`). Set it to get a WhatsApp ping on every booking; leave empty to disable. |
+| `MEET_WA_BRIDGE` | `127.0.0.1:3000` | host:port of the WhatsApp bridge (see below) |
+
+## WhatsApp notifications (optional)
+
+Get a WhatsApp message to **your own number** the moment someone books — no Twilio, no Meta API keys, no per-message cost. machin-meet reuses the same simple pattern as [Hermes](https://github.com/javimosch/hermes-agent) / OpenClaw: a local **Baileys bridge** that you pair once with your number (the WhatsApp Web protocol).
+
+1. Run the bridge and pair your number once (scan the QR with WhatsApp → Linked devices). With Hermes installed that's `hermes whatsapp`; the bridge listens on `127.0.0.1:3000` and exposes `POST /send {chatId, message}`.
+2. Start machin-meet with your JID:
+
+   ```bash
+   MEET_WA_CHATID='15551234567@s.whatsapp.net' \
+   MEET_SECRET='…' ./machin-meet
+   ```
+
+On each confirmed booking machin-meet POSTs a one-line summary (name, time, email, note) to the bridge's `/send`, which delivers it from your paired number to itself. It's **best-effort and fire-and-forget** — if the bridge is down the booking still succeeds. Point `MEET_WA_BRIDGE` elsewhere to use a different host/port.
+
+> Want a cloud provider instead (Twilio / WhatsApp Cloud API)? machin's `http_request` builtin (v0.33.0) can do an authenticated HTTPS POST with a `Bearer`/Basic `Authorization` header — swap `notify_owner` in [`meet.src`](meet.src) to call it.
 
 Availability, slot length, notice and horizon live in clearly-named functions at the top of [`meet.src`](meet.src) — edit and rebuild:
 

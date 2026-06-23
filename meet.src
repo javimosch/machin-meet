@@ -38,6 +38,16 @@ func SLOT_MIN() (n) { n = 30 }              // slot length in minutes
 func MIN_NOTICE_S() (n) { n = 7200 }        // earliest bookable: now + 2h
 func MAX_AHEAD_S() (n) { n = 1209600 }      // latest bookable: now + 14 days
 
+// WhatsApp notifications via a local Hermes/OpenClaw WhatsApp bridge (Baileys).
+// Pair your own number once (e.g. `hermes whatsapp`), then point machin-meet at
+// the bridge. MEET_WA_CHATID is your WhatsApp JID (e.g. 15551234567@s.whatsapp.net);
+// leave it empty to disable. MEET_WA_BRIDGE is the bridge host:port.
+func WA_CHATID() (s) { s = env("MEET_WA_CHATID") }
+func WA_BRIDGE() (s) {
+    s = env("MEET_WA_BRIDGE")
+    if s == "" { s = "127.0.0.1:3000" }
+}
+
 // weekly availability: minutes-from-midnight windows per weekday (0=Sun..6=Sat),
 // as flat [start, end, start, end, ...] pairs. Default: Mon-Fri 09:00-17:00.
 func work_windows(wd) (w) {
@@ -69,6 +79,39 @@ func jstr(s, path) (v) {
             }
         }
     }
+}
+
+// minimal JSON string escaping (quotes, backslashes, control chars)
+func json_escape(s) (o) {
+    o = s
+    o = replace(o, "\\", "\\\\")
+    o = replace(o, "\"", "\\\"")
+    o = replace(o, "\n", "\\n")
+    o = replace(o, "\r", "\\r")
+    o = replace(o, "\t", "\\t")
+}
+
+// ---------- WhatsApp notification (Hermes/OpenClaw bridge: POST /send) ----------
+
+// notify_owner sends a one-line WhatsApp message to the owner's own number via a
+// locally-running Baileys bridge (plain HTTP on localhost). Best-effort and
+// fire-and-forget: any failure is swallowed so it never blocks a booking.
+func notify_owner(msg) {
+    if WA_CHATID() == "" { return }            // notifications disabled
+    hostport := WA_BRIDGE()
+    host := hostport
+    port := 3000
+    ci := index(hostport, ":")
+    if ci >= 0 {
+        host = substr(hostport, 0, ci)
+        port = parse_int(substr(hostport, ci + 1, len(hostport)))
+    }
+    body := "{\"chatId\":\"" + json_escape(WA_CHATID()) + "\",\"message\":\"" + json_escape(msg) + "\"}"
+    fd := dial(host, port)
+    if fd < 0 { return }
+    write(fd, "POST /send HTTP/1.1\r\nHost: " + hostport + "\r\nContent-Type: application/json\r\nContent-Length: " + str(len(body)) + "\r\nConnection: close\r\n\r\n" + body)
+    read(fd)                                   // drain response; result ignored
+    close(fd)
 }
 
 // ---------- signed manage tokens ----------
@@ -202,6 +245,11 @@ func api_book(body) (res) {
     idv, _ := json_get(sqlite_query(db, "SELECT last_insert_rowid() AS id"), "[0].id")
     sqlite_close(db)
     tok := token_for(idv)
+    when := time_format(start, "%a %d %b %Y, %H:%M ") + time_format(start, "%Z")
+    msg := "✅ New booking\n" + nm + "\n" + when
+    if em != "" { msg = msg + "\n" + em }
+    if nt != "" { msg = msg + "\nNote: " + nt }
+    notify_owner(msg)
     res = ok_json("{\"ok\":true,\"id\":" + idv + ",\"manage\":\"/m/" + idv + "?t=" + tok + "\",\"ics\":\"/ics/" + idv + "?t=" + tok + "\"}")
 }
 
@@ -329,7 +377,7 @@ func page_html() (h) {
     h = h + "if(!s.length){w.textContent='No times available this day.';return}"
     h = h + "w.innerHTML='';s.forEach(x=>{const b=document.createElement('button');b.type='button';b.className='slot';b.textContent=x.label;b.onclick=()=>pick(x);w.appendChild(b)})}"
     h = h + "function pick(x){q('#start').value=String(x.start);q('#lbl').textContent=q('#date').value+' at '+x.label;q('#form').style.display='block';q('#name').focus()}"
-    h = h + "async function book(e){e.preventDefault();const startVal=q('#start').value;console.log('DEBUG: start value:',startVal,'type:',typeof startVal);const body={start:Number(startVal),name:q('#name').value,email:q('#email').value,note:q('#note').value};console.log('DEBUG: booking body:',body);"
+    h = h + "async function book(e){e.preventDefault();const body={start:Number(q('#start').value),name:q('#name').value,email:q('#email').value,note:q('#note').value};"
     h = h + "const r=await fetch('/api/book',{method:'POST',body:JSON.stringify(body)});const j=await r.json();"
     h = h + "if(j.ok){document.body.innerHTML='<div style=\\'font-family:system-ui;max-width:34rem;margin:3rem auto;padding:0 1rem\\'><h1>Booked &#10003;</h1><p>'+q('#lbl').textContent+'</p><p><a href='+j.ics+'>Add to calendar (.ics)</a></p><p><a href='+j.manage+'>Manage or cancel</a></p></div>'}"
     h = h + "else{alert(j.error||'Could not book');load()}}"
