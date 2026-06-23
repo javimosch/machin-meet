@@ -1,0 +1,378 @@
+// machin-meet — a minimal, self-hostable Calendly for one person, in machin (MFL).
+//
+// A single native binary: HTTP server (machweb) + SQLite storage + an embedded
+// booking page. Visitors pick a free slot, leave a name/email, and get a .ics
+// plus a signed manage/cancel link (HMAC — no accounts). The owner sees upcoming
+// bookings at /admin?key=<secret>.
+//
+// All times are the SERVER's local time (set $TZ); the page labels the zone.
+// Build on machin's time trio: time_make (construct) / time_fields (decompose) /
+// time_format (render strftime), plus sqlite_*, hmac_sha256, json_get.
+//
+//   MEET_SECRET=... MEET_TITLE='30-min call' TZ=Europe/Madrid ./machin-meet
+//   open http://localhost:48080
+
+// ---------- config (all overridable by environment) ----------
+
+func PORT() (p) {
+    p = parse_int(env("MEET_PORT"))
+    if p == 0 { p = 48080 }
+}
+
+func DB_PATH() (s) {
+    s = env("MEET_DB")
+    if s == "" { s = "meet.db" }
+}
+
+func SECRET() (s) {
+    s = env("MEET_SECRET")
+    if s == "" { s = "change-me-please" }
+}
+
+func TITLE() (s) {
+    s = env("MEET_TITLE")
+    if s == "" { s = "Book a 30-minute meeting" }
+}
+
+func SLOT_MIN() (n) { n = 30 }              // slot length in minutes
+func MIN_NOTICE_S() (n) { n = 7200 }        // earliest bookable: now + 2h
+func MAX_AHEAD_S() (n) { n = 1209600 }      // latest bookable: now + 14 days
+
+// weekly availability: minutes-from-midnight windows per weekday (0=Sun..6=Sat),
+// as flat [start, end, start, end, ...] pairs. Default: Mon-Fri 09:00-17:00.
+func work_windows(wd) (w) {
+    w = []int{}
+    if wd >= 1 {
+        if wd <= 5 { w = []int{540, 1020} }
+    }
+}
+
+// ---------- storage ----------
+
+func open_db() (db) {
+    db = sqlite_open(DB_PATH())
+    sqlite_exec(db, "CREATE TABLE IF NOT EXISTS booking(id INTEGER PRIMARY KEY AUTOINCREMENT, start_utc INTEGER, end_utc INTEGER, name TEXT, email TEXT, note TEXT, status TEXT, created INTEGER)")
+    // one confirmed booking per start time (hardens against double-booking)
+    sqlite_exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS uniq_slot ON booking(start_utc) WHERE status='confirmed'")
+}
+
+// json_get returns a value's raw JSON text: numbers bare, but strings keep their
+// surrounding quotes. jstr extracts a string field and strips them (MVP: no inner
+// unescaping, fine for names/emails/hex tokens).
+func jstr(s, path) (v) {
+    raw, _ := json_get(s, path)
+    v = raw
+    if len(raw) >= 2 {
+        if charat(raw, 0) == "\"" {
+            if charat(raw, len(raw) - 1) == "\"" {
+                v = substr(raw, 1, len(raw) - 1)
+            }
+        }
+    }
+}
+
+// ---------- signed manage tokens ----------
+
+func token_for(id) (t) { t = hmac_sha256(SECRET(), "booking:" + id) }
+
+func verify(id, tok) (ok) {
+    ok = false
+    if id == "" { return }
+    if tok == "" { return }
+    if token_for(id) == tok { ok = true }
+}
+
+// ---------- time helpers ----------
+
+// to_utc_stamp renders an epoch second as an iCalendar UTC stamp (YYYYMMDDTHHMMSSZ)
+// without a gmtime builtin: format (epoch - utc_offset) in local time, which
+// yields the UTC wall-clock digits. The offset comes from strftime's %z.
+func to_utc_stamp(t) (s) {
+    z := time_format(t, "%z")            // e.g. +0200 or -0500
+    sign := 1
+    if charat(z, 0) == "-" { sign = -1 }
+    hh := parse_int(substr(z, 1, 3))
+    mm := parse_int(substr(z, 3, 5))
+    off := sign * (hh * 3600 + mm * 60)
+    s = time_format(t - off, "%Y%m%dT%H%M%S") + "Z"
+}
+
+// is a slot start within the bookable horizon and not already taken?
+func slot_open(db, start) (open) {
+    open = false
+    if start <= now() + MIN_NOTICE_S() { return }
+    if start > now() + MAX_AHEAD_S() { return }
+    if slot_taken(db, start) { return }
+    open = true
+}
+
+func slot_taken(db, start) (taken) {
+    taken = false
+    end := start + SLOT_MIN() * 60
+    rows := sqlite_query(db, "SELECT count(*) AS n FROM booking WHERE status='confirmed' AND start_utc < ? AND end_utc > ?", []string{str(end), str(start)})
+    n, _ := json_get(rows, "[0].n")
+    if parse_int(n) > 0 { taken = true }
+}
+
+// does `start` land exactly on a valid slot boundary inside a work window?
+func slot_aligned(start) (ok) {
+    ok = false
+    f := time_fields(start)
+    if f[5] != 0 { return }                       // must be on a minute boundary
+    wd := f[6]
+    mod := f[3] * 60 + f[4]                        // minutes from midnight
+    wins := work_windows(wd)
+    slot := SLOT_MIN()
+    j := 0
+    for j + 1 < len(wins) {
+        ws := wins[j]
+        we := wins[j + 1]
+        if mod >= ws {
+            if mod + slot <= we {
+                if (mod - ws) % slot == 0 { ok = true  return }
+            }
+        }
+        j = j + 2
+    }
+}
+
+// ---------- query-string + helpers ----------
+
+func query_get(q, key) (v) {
+    v = ""
+    parts := split(q, "&")
+    for _, p := range parts {
+        eq := index(p, "=")
+        if eq >= 0 {
+            k := substr(p, 0, eq)
+            if k == key { v = substr(p, eq + 1, len(p)) }
+        }
+    }
+}
+
+// ---------- API: list free slots for a day ----------
+
+func api_slots(date) (res) {
+    if date == "" { res = bad_request("{\"error\":\"missing date\"}")  return }
+    parts := split(date, "-")
+    if len(parts) != 3 { res = bad_request("{\"error\":\"bad date (want YYYY-MM-DD)\"}")  return }
+    y := parse_int(parts[0])
+    mo := parse_int(parts[1])
+    d := parse_int(parts[2])
+    wd := time_fields(time_make(y, mo, d, 12, 0, 0))[6]
+    wins := work_windows(wd)
+    db := open_db()
+    out := "["
+    first := true
+    slot := SLOT_MIN()
+    j := 0
+    for j + 1 < len(wins) {
+        ws := wins[j]
+        we := wins[j + 1]
+        m := ws
+        for m + slot <= we {
+            start := time_make(y, mo, d, m / 60, m % 60, 0)
+            if slot_open(db, start) {
+                if first == false { out = out + "," }
+                out = out + "{\"start\":" + str(start) + ",\"label\":\"" + time_format(start, "%H:%M") + "\"}"
+                first = false
+            }
+            m = m + slot
+        }
+        j = j + 2
+    }
+    out = out + "]"
+    sqlite_close(db)
+    res = ok_json(out)
+}
+
+// ---------- API: create a booking ----------
+
+func api_book(body) (res) {
+    sv, _ := json_get(body, ".start")
+    nm := jstr(body, ".name")
+    em := jstr(body, ".email")
+    nt := jstr(body, ".note")
+    start := parse_int(sv)
+    if start <= 0 { res = bad_request("{\"error\":\"missing start\"}")  return }
+    if nm == "" { res = bad_request("{\"error\":\"name is required\"}")  return }
+    if slot_aligned(start) == false { res = bad_request("{\"error\":\"not a valid slot\"}")  return }
+    if start <= now() + MIN_NOTICE_S() { res = bad_request("{\"error\":\"too soon to book\"}")  return }
+    if start > now() + MAX_AHEAD_S() { res = bad_request("{\"error\":\"too far ahead\"}")  return }
+    end := start + SLOT_MIN() * 60
+    db := open_db()
+    rc := sqlite_exec(db, "INSERT INTO booking(start_utc,end_utc,name,email,note,status,created) VALUES(?,?,?,?,?,'confirmed',?)", []string{str(start), str(end), nm, em, nt, str(now())})
+    if rc != 0 {
+        sqlite_close(db)
+        res = response("409 Conflict", "application/json", "{\"error\":\"that slot was just taken\"}")
+        return
+    }
+    idv, _ := json_get(sqlite_query(db, "SELECT last_insert_rowid() AS id"), "[0].id")
+    sqlite_close(db)
+    tok := token_for(idv)
+    res = ok_json("{\"ok\":true,\"id\":" + idv + ",\"manage\":\"/m/" + idv + "?t=" + tok + "\",\"ics\":\"/ics/" + idv + "?t=" + tok + "\"}")
+}
+
+// ---------- API: cancel ----------
+
+func api_cancel(body) (res) {
+    idv, _ := json_get(body, ".id")
+    tok := jstr(body, ".token")
+    if verify(idv, tok) == false { res = response("403 Forbidden", "application/json", "{\"error\":\"bad token\"}")  return }
+    db := open_db()
+    sqlite_exec(db, "UPDATE booking SET status='canceled' WHERE id=?", []string{idv})
+    sqlite_close(db)
+    res = ok_json("{\"ok\":true}")
+}
+
+// ---------- .ics ----------
+
+func serve_ics(id, tok) (res) {
+    if verify(id, tok) == false { res = response("403 Forbidden", "text/plain", "forbidden")  return }
+    db := open_db()
+    rows := sqlite_query(db, "SELECT start_utc,end_utc,name FROM booking WHERE id=?", []string{id})
+    sqlite_close(db)
+    st, e1 := json_get(rows, "[0].start_utc")
+    if e1 != "" { res = not_found()  return }
+    en, _ := json_get(rows, "[0].end_utc")
+    start := parse_int(st)
+    end := parse_int(en)
+    body := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//machin-meet//EN\r\nCALSCALE:GREGORIAN\r\nMETHOD:PUBLISH\r\nBEGIN:VEVENT\r\nUID:meet-" + id + "@machin\r\nDTSTAMP:" + to_utc_stamp(now()) + "\r\nDTSTART:" + to_utc_stamp(start) + "\r\nDTEND:" + to_utc_stamp(end) + "\r\nSUMMARY:" + TITLE() + "\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    res = response("200 OK", "text/calendar; charset=utf-8", body)
+}
+
+// ---------- manage page ----------
+
+func manage_page(id, tok) (res) {
+    if verify(id, tok) == false { res = response("403 Forbidden", "text/html", "<h1>Forbidden</h1>")  return }
+    db := open_db()
+    rows := sqlite_query(db, "SELECT start_utc,name,status FROM booking WHERE id=?", []string{id})
+    sqlite_close(db)
+    st, e1 := json_get(rows, "[0].start_utc")
+    if e1 != "" { res = not_found()  return }
+    nm := jstr(rows, "[0].name")
+    stt := jstr(rows, "[0].status")
+    start := parse_int(st)
+    when := time_format(start, "%A %d %B %Y, %H:%M ") + time_format(start, "%Z")
+    h := "<!doctype html><meta charset=utf-8><title>Manage booking</title>"
+    h = h + "<style>body{font-family:system-ui,sans-serif;max-width:34rem;margin:3rem auto;padding:0 1rem;line-height:1.5}button{padding:.6rem 1rem;font-size:1rem;cursor:pointer}a{color:#2563eb}</style>"
+    h = h + "<h1>" + TITLE() + "</h1>"
+    h = h + "<p>Booked for <b>" + nm + "</b><br>" + when + "</p>"
+    if stt == "confirmed" {
+        h = h + "<p>Status: confirmed.</p>"
+        h = h + "<p><a href='/ics/" + id + "?t=" + tok + "'>Add to calendar (.ics)</a></p>"
+        h = h + "<button onclick='cx()'>Cancel this booking</button>"
+        h = h + "<script>async function cx(){if(!confirm('Cancel this booking?'))return;const r=await fetch('/api/cancel',{method:'POST',body:JSON.stringify({id:" + id + ",token:'" + tok + "'})});const j=await r.json();if(j.ok){document.body.innerHTML='<h1>Canceled</h1><p>Your booking has been canceled.</p>'}else{alert(j.error||'error')}}</script>"
+    }
+    if stt != "confirmed" {
+        h = h + "<p>Status: <b>" + stt + "</b></p>"
+    }
+    res = ok_html(h)
+}
+
+// ---------- admin ----------
+
+func admin_page(key) (res) {
+    if key != SECRET() {
+        res = response("403 Forbidden", "text/html", "<h1>403</h1><p>Append <code>?key=YOUR_SECRET</code> to the URL.</p>")
+        return
+    }
+    db := open_db()
+    rows := sqlite_query(db, "SELECT id,start_utc,name,email FROM booking WHERE status='confirmed' AND start_utc > ? ORDER BY start_utc", []string{str(now())})
+    sqlite_close(db)
+    h := "<!doctype html><meta charset=utf-8><title>Upcoming bookings</title>"
+    h = h + "<style>body{font-family:system-ui,sans-serif;max-width:48rem;margin:3rem auto;padding:0 1rem}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:.5rem;text-align:left}</style>"
+    h = h + "<h1>Upcoming bookings</h1>"
+    h = h + "<table><tr><th>When</th><th>Name</th><th>Email</th></tr>"
+    i := 0
+    n := 0
+    for i < 500 {
+        st, e := json_get(rows, "[" + str(i) + "].start_utc")
+        if e != "" { break }
+        nm := jstr(rows, "[" + str(i) + "].name")
+        em := jstr(rows, "[" + str(i) + "].email")
+        when := time_format(parse_int(st), "%a %d %b %Y, %H:%M")
+        h = h + "<tr><td>" + when + "</td><td>" + nm + "</td><td>" + em + "</td></tr>"
+        i = i + 1
+        n = n + 1
+    }
+    h = h + "</table>"
+    if n == 0 { h = h + "<p>No upcoming bookings.</p>" }
+    res = ok_html(h)
+}
+
+// ---------- booking page ----------
+
+func page_html() (h) {
+    tz := time_format(now(), "%Z")
+    h = "<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+    h = h + "<title>" + TITLE() + "</title>"
+    h = h + "<style>"
+    h = h + "body{font-family:system-ui,sans-serif;max-width:34rem;margin:2.5rem auto;padding:0 1rem;color:#111;line-height:1.5}"
+    h = h + "h1{font-size:1.5rem}.muted{color:#666;font-size:.9rem}"
+    h = h + "input,button{font-size:1rem}input[type=date],input[type=text],input[type=email]{padding:.5rem;width:100%;box-sizing:border-box;margin:.25rem 0}"
+    h = h + "#slots{display:flex;flex-wrap:wrap;gap:.5rem;margin:1rem 0}"
+    h = h + ".slot{padding:.55rem .8rem;border:1px solid #2563eb;background:#fff;color:#2563eb;border-radius:.4rem;cursor:pointer}"
+    h = h + ".slot:hover{background:#2563eb;color:#fff}"
+    h = h + "#form{display:none;border-top:1px solid #eee;margin-top:1rem;padding-top:1rem}"
+    h = h + "button.primary{background:#2563eb;color:#fff;border:0;padding:.65rem 1.1rem;border-radius:.4rem;cursor:pointer}"
+    h = h + "</style>"
+    h = h + "<h1>" + TITLE() + "</h1>"
+    h = h + "<p class=muted>All times shown in <b>" + tz + "</b>. Slots are " + str(SLOT_MIN()) + " minutes.</p>"
+    h = h + "<label>Pick a day<br><input type=date id=date></label>"
+    h = h + "<div id=slots></div>"
+    h = h + "<form id=form onsubmit='return book(event)'>"
+    h = h + "<p>Booking <b id=lbl></b></p>"
+    h = h + "<input type=hidden id=start>"
+    h = h + "<label>Your name<br><input type=text id=name required></label>"
+    h = h + "<label>Email<br><input type=email id=email></label>"
+    h = h + "<label>Note (optional)<br><input type=text id=note></label>"
+    h = h + "<p><button class=primary type=submit>Confirm booking</button></p>"
+    h = h + "</form>"
+    h = h + "<script>"
+    h = h + "const q=s=>document.querySelector(s);"
+    h = h + "const iso=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');"
+    h = h + "async function load(){const date=q('#date').value;const w=q('#slots');q('#form').style.display='none';w.textContent='Loading...';"
+    h = h + "const r=await fetch('/api/slots?date='+date);const s=await r.json();"
+    h = h + "if(!s.length){w.textContent='No times available this day.';return}"
+    h = h + "w.innerHTML='';s.forEach(x=>{const b=document.createElement('button');b.type='button';b.className='slot';b.textContent=x.label;b.onclick=()=>pick(x);w.appendChild(b)})}"
+    h = h + "function pick(x){q('#start').value=x.start;q('#lbl').textContent=q('#date').value+' at '+x.label;q('#form').style.display='block';q('#name').focus()}"
+    h = h + "async function book(e){e.preventDefault();const body={start:Number(q('#start').value),name:q('#name').value,email:q('#email').value,note:q('#note').value};"
+    h = h + "const r=await fetch('/api/book',{method:'POST',body:JSON.stringify(body)});const j=await r.json();"
+    h = h + "if(j.ok){document.body.innerHTML='<div style=\\'font-family:system-ui;max-width:34rem;margin:3rem auto;padding:0 1rem\\'><h1>Booked &#10003;</h1><p>'+q('#lbl').textContent+'</p><p><a href='+j.ics+'>Add to calendar (.ics)</a></p><p><a href='+j.manage+'>Manage or cancel</a></p></div>'}"
+    h = h + "else{alert(j.error||'Could not book');load()}}"
+    h = h + "window.onload=()=>{const t=new Date();const d=q('#date');d.value=iso(t);d.min=iso(t);d.max=iso(new Date(t.getTime()+14*864e5));d.onchange=load;load()};"
+    h = h + "</script>"
+    return
+}
+
+// ---------- routing ----------
+
+func handle(req) (res) {
+    path := req.path
+    q := ""
+    qi := index(path, "?")
+    if qi >= 0 {
+        q = substr(path, qi + 1, len(path))
+        path = substr(path, 0, qi)
+    }
+    if req.method == "GET" {
+        if path == "/" { res = ok_html(page_html())  return }
+        if path == "/api/slots" { res = api_slots(query_get(q, "date"))  return }
+        if path == "/admin" { res = admin_page(query_get(q, "key"))  return }
+        if has_prefix(path, "/ics/") { res = serve_ics(param(path, "/ics/"), query_get(q, "t"))  return }
+        if has_prefix(path, "/m/") { res = manage_page(param(path, "/m/"), query_get(q, "t"))  return }
+    }
+    if req.method == "POST" {
+        if path == "/api/book" { res = api_book(req.body)  return }
+        if path == "/api/cancel" { res = api_cancel(req.body)  return }
+    }
+    res = not_found()
+}
+
+func main() {
+    println("machin-meet: " + TITLE())
+    println("  booking page  http://localhost:" + str(PORT()) + "/")
+    println("  admin         http://localhost:" + str(PORT()) + "/admin?key=" + SECRET())
+    serve(PORT(), func(req) { return handle(req) })
+}
