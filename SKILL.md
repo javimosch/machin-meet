@@ -78,8 +78,8 @@ paths (each a no-op if unset):
 
 ## Deploy behind HTTPS
 
-Run the binary under **systemd** (robust; survives reboot), and put a reverse
-proxy (Traefik/Caddy/nginx) in front for TLS, routing to `localhost:$MEET_PORT`.
+Run the binary under **systemd** (robust; survives reboot), and put any reverse
+proxy in front for TLS, routing to `localhost:$MEET_PORT`.
 
 ```ini
 # /etc/systemd/system/machin-meet.service
@@ -100,18 +100,13 @@ sudo systemctl enable --now machin-meet
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:48080/   # expect 200
 ```
 
-### Deploy gotchas (learned the hard way)
+### Deploy gotchas
 
-- **Don't pass spaces in env values via a process-manager `--cmd`** — wrap with
-  `/usr/bin/env VAR=val …` or (better) use systemd `Environment=` lines.
 - **A booking writes SQLite in the process CWD** unless `MEET_DB` is absolute —
   always set `MEET_DB=/abs/path` for deploys so bookings persist.
-- **Reverse-proxy host rules:** if your tool auto-appends a base domain, pass the
-  **subdomain only** (e.g. `app.dk1`), or you get a doubled `Host(app.dk1.base.base)`
-  that 404s.
-- **ACME DNS-01 "identical record already exists":** a stale `_acme-challenge`
-  TXT from a previous attempt blocks issuance — delete it via the DNS provider's
-  API, then restart the proxy to re-issue.
+- **Prefer systemd `Environment=` lines** for config. If a process manager only
+  takes a single command string, wrap env in `/usr/bin/env VAR=val … ` and avoid
+  spaces in values.
 - The binary is dynamically linked (`libsqlite3` + glibc) — the target host needs
   a compatible glibc and `libsqlite3.so`.
 
