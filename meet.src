@@ -137,7 +137,7 @@ func query_get(q, key) (v) {
         eq := index(p, "=")
         if eq >= 0 {
             k := substr(p, 0, eq)
-            if k == key { v = substr(p, eq + 1, len(p)) }
+            if k == key { v = url_decode(substr(p, eq + 1, len(p))) }
         }
     }
 }
@@ -328,8 +328,8 @@ func page_html() (h) {
     h = h + "const r=await fetch('/api/slots?date='+date);const s=await r.json();"
     h = h + "if(!s.length){w.textContent='No times available this day.';return}"
     h = h + "w.innerHTML='';s.forEach(x=>{const b=document.createElement('button');b.type='button';b.className='slot';b.textContent=x.label;b.onclick=()=>pick(x);w.appendChild(b)})}"
-    h = h + "function pick(x){q('#start').value=x.start;q('#lbl').textContent=q('#date').value+' at '+x.label;q('#form').style.display='block';q('#name').focus()}"
-    h = h + "async function book(e){e.preventDefault();const body={start:Number(q('#start').value),name:q('#name').value,email:q('#email').value,note:q('#note').value};"
+    h = h + "function pick(x){q('#start').value=String(x.start);q('#lbl').textContent=q('#date').value+' at '+x.label;q('#form').style.display='block';q('#name').focus()}"
+    h = h + "async function book(e){e.preventDefault();const startVal=q('#start').value;console.log('DEBUG: start value:',startVal,'type:',typeof startVal);const body={start:Number(startVal),name:q('#name').value,email:q('#email').value,note:q('#note').value};console.log('DEBUG: booking body:',body);"
     h = h + "const r=await fetch('/api/book',{method:'POST',body:JSON.stringify(body)});const j=await r.json();"
     h = h + "if(j.ok){document.body.innerHTML='<div style=\\'font-family:system-ui;max-width:34rem;margin:3rem auto;padding:0 1rem\\'><h1>Booked &#10003;</h1><p>'+q('#lbl').textContent+'</p><p><a href='+j.ics+'>Add to calendar (.ics)</a></p><p><a href='+j.manage+'>Manage or cancel</a></p></div>'}"
     h = h + "else{alert(j.error||'Could not book');load()}}"
